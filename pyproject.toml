@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>62.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qualifly"
+version = "0.1.0"
+description = "data-engineering and analysis tool to combine and compare DLR and OpenSkyNetwork historical data"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyopensky",
+    "traffic",
+    "matplotlib",
+    "numpy",
+    "pandas<3.0",
+    "plotly>=6.8.0",
+    "kaleido",
+    "similaritymeasures",
+    "pyyaml",
+]
+authors = [
+    {name = "Laura Keller", email = "laura.keller@dlr.de"},
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["test_dir"]
+pythonpath = ["."]
+
