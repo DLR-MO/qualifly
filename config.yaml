@@ -1,5 +1,25 @@
-target: opensky
+# SPDX-FileCopyrightText: 2026 German Aerospace Center (DLR)
+#
+# SPDX-License-Identifier: MIT
 
-FLIGHT_IDS: [
+source: local_file_in
+target: local_public_ref
 
-]
+# Largest gap in the source data (seconds, >= 0) that is still interpolated across
+# to a report time; reports in wider source gaps are not evaluated.
+max_gap_s: 2.0
+
+# Time window of the shape metrics pos_track_* (seconds, > 0): the closest point of
+# the reference track is searched within this time around each report. 2 s is the
+# total latency allowed for ADS-B positions (14 CFR 91.227).
+track_window_s: 2.0
+
+# Per-backend options of the data sources, e.g. source names and data directories
+# for the local file fetchers.
+data_fetching:
+  local_file_in:
+    path: local_flight_data/in
+    # the stored geometric altitude is already the height above the WGS-84 ellipsoid
+    geo_alt_is_msl: false
+  local_public_ref:
+    path: local_flight_data/reference

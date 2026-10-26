@@ -1,0 +1,4 @@
+Files in this folder and its subfolders are owned by the German Aerospace Center (DLR) e.v. and subjet to the CC-BY-NC-ND 4.0 license
+# SPDX-FileCopyrightText: 2026 German Aerospace Center (DLR)
+#
+# SPDX-License-Identifier: CC-BY-NC-ND 4.0

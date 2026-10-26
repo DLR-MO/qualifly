@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 German Aerospace Center (DLR)
+#
+# SPDX-License-Identifier: MIT
+
 from __future__ import annotations
 
 import importlib
@@ -34,15 +38,6 @@ def _ensure_module(dotted_name: str, **attributes: Any) -> types.ModuleType:
             setattr(module, attr_name, value)
     return module
 
-
-# --- cartes (geospatial projections, used for Kalman filtering) -------------
-_ensure_module("cartes.crs", EuroPP=_Placeholder)
-
-# --- traffic (trajectory filtering library) ---------------------------------
-_ensure_module("traffic.core", Flight=_Placeholder)
-_ensure_module("traffic.algorithms.filters", FilterMedian=_Placeholder, FilterMean=_Placeholder)
-_ensure_module("traffic.algorithms.filters.aggressive", FilterDerivative=_Placeholder)
-_ensure_module("traffic.algorithms.filters.kalman", KalmanFilter6D=_Placeholder, KalmanSmoother6D=_Placeholder)
 
 # --- pyopensky (OpenSky Network Trino client) -------------------------------
 _ensure_module("pyopensky.trino", Trino=_Placeholder)

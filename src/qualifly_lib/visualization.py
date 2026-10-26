@@ -1,16 +1,27 @@
+# SPDX-FileCopyrightText: 2026 German Aerospace Center (DLR)
+#
+# SPDX-License-Identifier: MIT
+
 import colorsys
 import random
+import threading
 from enum import StrEnum
 
-import matplotlib.pyplot as plt
+import matplotlib
 import matplotlib.dates as mdates
+from matplotlib import style
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 
-plt.style.use('default')
 
-plt.rcParams.update({
+# No pyplot: figure objects render via their own Agg canvas, so parallel
+# flights never share matplotlib's global figure state
+style.use('default')
+
+matplotlib.rcParams.update({
     'font.size': 17,
     'axes.titlesize': 20,
     'axes.labelsize': 18,
@@ -27,7 +38,6 @@ _FILTER_COLORS = {
     "median": "#8c564b",           # brown
     "mean": "#17becf",             # cyan
     "derivative": "#bcbd22",       # olive
-    "kalman": "#9467bd",           # purple
     "kalman_smoother": "#2ca02c",  # green
 }
 
@@ -36,6 +46,7 @@ _FILTER_COLORS = {
 _GOLDEN_RATIO_CONJUGATE = 0.6180339887498949
 _hue_offset = random.random()
 _dynamic_filter_colors: dict[str, str] = {}
+_COLORS_LOCK = threading.Lock()
 
 
 def _random_filter_color() -> str:
@@ -53,15 +64,22 @@ def _get_filter_color(fname: str) -> str:
     """
     if fname in _FILTER_COLORS:
         return _FILTER_COLORS[fname]
-    if fname not in _dynamic_filter_colors:
-        _dynamic_filter_colors[fname] = _random_filter_color()
-    return _dynamic_filter_colors[fname]
+    with _COLORS_LOCK:
+        if fname not in _dynamic_filter_colors:
+            _dynamic_filter_colors[fname] = _random_filter_color()
+        return _dynamic_filter_colors[fname]
 
 
-def plot_trajectory_map(source_df, target_df, config, collection_id=None, best_variant_name=None, best_variant_df=None):
+def _hover_labels(index):
+    """Precise sample timestamps (ISO, microsecond resolution) for map hover labels."""
+    return [t.strftime("%Y-%m-%d %H:%M:%S.%f") if hasattr(t, "strftime") else str(t)
+            for t in index]
+
+
+def plot_trajectory_map(source_df, target_df, config, collection_id=None, variant_dfs=None):
     """
-    Creates street-map overview of Germany with predefined styling.
-    Plots source, the original (unfiltered) target trajectory, and the best-scoring filter variant's trajectory.
+    Creates a street-map overview of Germany with predefined styling: the source,
+    the original target and every filter variant.
     """
     source = config["source"]
     target = config["target"]
@@ -73,6 +91,8 @@ def plot_trajectory_map(source_df, target_df, config, collection_id=None, best_v
         lon=source_df[source.LON],
         mode='lines+markers',
         name=source.IDENTIFIER,
+        text=_hover_labels(source_df.index),
+        hovertemplate="%{text}<br>(%{lat:.5f}, %{lon:.5f})<extra>" + source.IDENTIFIER + "</extra>",
         marker=dict(size=6, color='blue'),
         line=dict(width=2, color='blue')
     ))
@@ -81,17 +101,21 @@ def plot_trajectory_map(source_df, target_df, config, collection_id=None, best_v
         lon=target_df[target.LON],
         mode='lines+markers',
         name=target.IDENTIFIER,
+        text=_hover_labels(target_df.index),
+        hovertemplate="%{text}<br>(%{lat:.5f}, %{lon:.5f})<extra>" + target.IDENTIFIER + "</extra>",
         marker=dict(size=6, color=_get_filter_color("original")),
         line=dict(width=2, color=_get_filter_color("original"))
     ))
-    if best_variant_df is not None:
+    for name, variant_df in (variant_dfs or {}).items():
         fig.add_trace(go.Scattermap(
-            lat=best_variant_df[target.LAT],
-            lon=best_variant_df[target.LON],
+            lat=variant_df[target.LAT],
+            lon=variant_df[target.LON],
             mode='lines+markers',
-            name=f"filter {best_variant_name}",
-            marker=dict(size=6, color=_get_filter_color(best_variant_name)),
-            line=dict(width=2, color=_get_filter_color(best_variant_name))
+            name=f"filter {name}",
+            text=_hover_labels(variant_df.index),
+            hovertemplate="%{text}<br>(%{lat:.5f}, %{lon:.5f})<extra>filter " + str(name) + "</extra>",
+            marker=dict(size=6, color=_get_filter_color(name)),
+            line=dict(width=2, color=_get_filter_color(name))
         ))
     fig.update_layout(
         title=dict(text=title, x=0.5, xanchor='center'),
@@ -109,8 +133,9 @@ def plot_trajectory_map(source_df, target_df, config, collection_id=None, best_v
 
 def plot_time_series_overview(source_df, target_df, config, filtered_results=None, score=None):
     """
-    Creates Time-Series-Plots with standardized styling for svg save.
-    The info card is placed dynamically below the legend.
+    Creates time-series plots with standardized styling for SVG export: one panel
+    per parameter (geometric altitude and, if both sides carry it, ground speed).
+    The info card sits below the legend.
     """
     source = config["source"]
     target = config["target"]
@@ -118,24 +143,28 @@ def plot_time_series_overview(source_df, target_df, config, filtered_results=Non
     reverse_mapping = {target_val: source_val for source_val, target_val in mapping.items()}
 
     cols = [target.GEOALT]
+    gs_column = getattr(target, "GROUNDSPEED", None)
+    if gs_column and gs_column in target_df.columns and reverse_mapping.get(gs_column) in source_df.columns:
+        cols.append(gs_column)
 
     fig_width = 13.5
     fig_height = 6.5
     axes_height = fig_height * len(cols)
     total_height = axes_height
 
-    fig, ax = plt.subplots(nrows=len(cols), figsize=(fig_width, total_height))
-    ax = np.atleast_1d(ax)
-
-    best_alt_variant, _, _ = _best_variant(score, "alt") if score else (None, None, None)
+    fig = Figure(figsize=(fig_width, total_height))
+    FigureCanvasAgg(fig)  # own canvas per figure, pyplot-free
+    ax = np.atleast_1d(fig.subplots(nrows=len(cols)))
 
     for i, col in enumerate(cols):
-        ax[i].set_ylabel(col)
+        metric_prefix = "gs" if col == gs_column else "alt"
+        unit = "m/s" if col == gs_column else "m"
+        ax[i].set_ylabel(f"{col} [{unit}]" if col == gs_column else col)
         # Plot source data
         source_param = reverse_mapping[col]
         ax[i].plot(source_df.index, source_df[source_param], label=source.IDENTIFIER, alpha=0.7, linewidth=0.6, c='blue')
         # Plot original target data
-        target_label = f"{target.IDENTIFIER} : {_format_metrics(score['original'], 'alt')}" if score else target.IDENTIFIER
+        target_label = f"{target.IDENTIFIER} : {_format_metrics(score['original'], metric_prefix, unit)}" if score else target.IDENTIFIER
         ax[i].plot(target_df.index, target_df[col], label=target_label, alpha=0.7, linewidth=0.6, c=_get_filter_color("original"))
         # Plot filtered target data - each variant against its own index, since a
         # filter (derivative, a rolling window, ...) can return fewer rows than target_df
@@ -143,7 +172,7 @@ def plot_time_series_overview(source_df, target_df, config, filtered_results=Non
             for fname, f_df in filtered_results.items():
                 label = f"filter {fname}"
                 if score:
-                    label += f" : {_format_metrics(score[fname], 'alt')}"
+                    label += f" : {_format_metrics(score[fname], metric_prefix, unit)}"
                 ax[i].plot(
                     f_df.index, f_df[col],
                     label=label,
@@ -156,7 +185,7 @@ def plot_time_series_overview(source_df, target_df, config, filtered_results=Non
         ax[i].grid(True, linewidth=0.3)
         # Only show HH:MM:SS on the x-axis, not the date
         ax[i].xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-    plt.tight_layout()
+    fig.tight_layout()
 
     # Reserve space at the bottom for the legend, otherwise tight_layout() lets the
     # axes fill the full figure height and the legend gets drawn on top of the plot.
@@ -170,26 +199,6 @@ def plot_time_series_overview(source_df, target_df, config, filtered_results=Non
         bbox_to_anchor=(0.5, 0.01),
         ncol=2,
     )
-
-    # info_lines = []
-    # if score is not None:
-    #     info_lines.append(f"Original : {_format_metrics(score['original'], 'alt')}")
-    #
-    #     best_pos_variant, _, best_pos_metric = _best_variant(score, "pos")
-    #     best_alt_variant, _, best_alt_metric = _best_variant(score, "alt")
-    #
-    #     if best_alt_variant is not None:
-    #         info_lines.append(f"Best altitude ({best_alt_metric.upper()}): {best_alt_variant} "
-    #                           f"({_format_metrics(score[best_alt_variant], 'alt')})")
-    #
-    # if info_lines:
-    #     # Measure the legend's actual rendered extent depending on filter variants so the info card sits just below it
-    #     fig.canvas.draw()
-    #     legend_bbox_fig = legend.get_window_extent(fig.canvas.get_renderer()).transformed(fig.transFigure.inverted())
-    #     info_y = legend_bbox_fig.y0 - 0.03  # Space between legend and info card
-    #     fig.text(legend_x + 0.02,  # Align with left border of legend
-    #              info_y, "\n".join(info_lines), fontsize=9, va='top', ha='left',
-    #              bbox=dict(boxstyle='round', facecolor='white', edgecolor='gray', alpha=0.9))
 
     return fig
 
@@ -205,7 +214,9 @@ def plot_time_series_overview_interactive(
     mapping = _source_to_target(source, target)
     reverse_mapping = {target_val: source_val for source_val, target_val in mapping.items()}
 
-    params = [c for c in target_df.columns if c in mapping.values()]
+    # only parameters both sides carry (e.g. a target velocity without a source ground speed is skipped)
+    params = [c for c in target_df.columns
+              if c in mapping.values() and reverse_mapping[c] in source_df.columns]
 
     n_series_rows = len(params)
     specs = [[{"type": "xy", "colspan": 2}, None] for _ in range(n_series_rows)]
@@ -224,9 +235,6 @@ def plot_time_series_overview_interactive(
 
     filter_names = list(filtered_results.keys()) if filtered_results else []
     filter_colors = {fname: _get_filter_color(fname) for fname in filter_names}
-
-    best_pos_variant, _, best_pos_metric = _best_variant(score, "pos") if score else (None, None, None)
-    best_alt_variant, _, best_alt_metric = _best_variant(score, "alt") if score else (None, None, None)
 
     for i, target_param in enumerate(params):
         row = i + 1
@@ -253,18 +261,17 @@ def plot_time_series_overview_interactive(
         if filtered_results:
             for fname in filter_names:
                 f_df = filtered_results[fname]
-                is_best = fname in (best_pos_variant, best_alt_variant)
-                name = f"{'\u2605 ' if is_best else ''}filter {fname}"
                 fig.add_trace(go.Scatter(
                     x=f_df.index, y=f_df[target_param],
-                    mode='lines', name=name,
+                    mode='lines', name=f"filter {fname}",
                     line=dict(color=filter_colors[fname], width=1),
                     legendgroup=f'filter_{fname}',
                     showlegend=(i == 0),
                     opacity=0.6
                 ), row=row, col=1)
 
-        fig.update_yaxes(title_text=target_param, row=row, col=1)
+        ylabel = "ground speed [m/s]" if target_param == str(getattr(target, "GROUNDSPEED", "")) else target_param
+        fig.update_yaxes(title_text=ylabel, row=row, col=1)
         fig.update_xaxes(title_text='Time (UTC)', showticklabels=True, row=row, col=1)
 
     fig.update_xaxes(tickformat='%H:%M:%S')
@@ -319,14 +326,6 @@ def plot_time_series_overview_interactive(
         info_lines.append(f"Original : {_format_metrics(score['original'], 'pos')} , "
                           f"{_format_metrics(score['original'], 'alt')}")
 
-        if best_pos_variant is not None:
-            info_lines.append(f"\u2605 Best position ({best_pos_metric.upper()}): {best_pos_variant} "
-                              f"({_format_metrics(score[best_pos_variant], 'pos')})")
-
-        if best_alt_variant is not None:
-            info_lines.append(f"\u2605 Best altitude ({best_alt_metric.upper()}): {best_alt_variant} "
-                              f"({_format_metrics(score[best_alt_variant], 'alt')})")
-
         fig.add_annotation(
             text="<br>".join(info_lines),
             xref='paper', yref='paper',
@@ -353,7 +352,7 @@ def _format_date(df):
 
 def _collect_metric_names(score, prefix):
     """
-    Returns the ordered, de-duplicated list of metric suffixes (e.g. ["rmse", "dfd", "dtw"])
+    Returns the ordered, de-duplicated list of metric suffixes (e.g. ["p95", "track_mean"])
     that appear under the given prefix ("pos" or "alt") anywhere in score.
     """
     prefix_ = f"{prefix}_"
@@ -365,10 +364,10 @@ def _collect_metric_names(score, prefix):
     return names
 
 
-def _format_metrics(scores, prefix):
+def _format_metrics(scores, prefix, unit="m"):
     """
-    Formats all metrics under the given prefix ("pos" or "alt") present in this one
-    variant's scores dict into a compact display string, e.g. "RMSE 19.56 / DFD 67.54 m".
+    Formats all metrics under one prefix ("pos", "alt" or "gs") of a variant's
+    scores into a compact string, e.g. "RMSE 19.56 / P95 33.70 m".
     """
     prefix_ = f"{prefix}_"
     parts = [
@@ -376,7 +375,7 @@ def _format_metrics(scores, prefix):
         for key, value in scores.items()
         if key.startswith(prefix_) and value is not None
     ]
-    return f"{' / '.join(parts)} m" if parts else "N/A"
+    return f"{' / '.join(parts)} {unit}" if parts else "N/A"
 
 
 def _metric_row(scores, prefix, metric_names):
@@ -403,27 +402,6 @@ def _metrics_table_data(score):
     pos_col_labels = ["Variant"] + [n.upper() for n in pos_names]
     alt_col_labels = ["Variant"] + [n.upper() for n in alt_names]
     return variant_names, pos_col_labels, pos_rows, alt_col_labels, alt_rows
-
-
-def _best_variant(score, prefix):
-    """
-    Finds the variant with the lowest value for the *first* metric available under the given prefix.
-    Returns (variant_name, value, metric_name) or (None, None, None) if no metric is found.
-    """
-    metric_names = _collect_metric_names(score, prefix)
-    if not metric_names:
-        return None, None, None
-    metric_key = f"{prefix}_{metric_names[0]}"
-
-    candidates = {
-        variant: values[metric_key]
-        for variant, values in score.items()
-        if values.get(metric_key) is not None
-    }
-    if not candidates:
-        return None, None, None
-    best = min(candidates, key=candidates.get)
-    return best, candidates[best], metric_names[0]
 
 
 def _source_to_target(
